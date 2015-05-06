@@ -1,11 +1,14 @@
-#lang racket/base
-(require racket/contract/base
-         racket/vector
-         racket/match)
+#lang typed/racket/base
+(require racket/vector
+         racket/match
+         racket/bool)
 
 (define MIN-SIZE 4)
-
-(struct heap ([vec #:mutable] [count #:mutable] <=?))
+(struct empty ())
+(struct (a) heap ([vec : (Vectorof (U empty a))]
+                  [count : Integer]
+                  [<=? : (-> a a Boolean)])
+  #:mutable)
 ;; length(vec)/4 <= size <= length(vec), except size >= MIN-SIZE
 ;; size = next available index
 
@@ -15,95 +18,98 @@
 
 (define (vt-root) 0)
 
-(define (vt-parent n) (quotient (sub1 n) 2))
-(define (vt-leftchild n) (+ (* n 2) 1))
-(define (vt-rightchild n) (+ (* n 2) 2))
+(define (vt-parent [n : Integer]) (quotient (sub1 n) 2))
+(define (vt-leftchild [n : Integer]) (+ (* n 2) 1))
+(define (vt-rightchild [n : Integer]) (+ (* n 2) 2))
 
-(define (vt-root? n) (zero? n))
-(define (vt-leftchild? n) (odd? n))
-(define (vt-rightchild? n) (even? n))
+(define (vt-root? [n : Integer]) (zero? n))
+(define (vt-leftchild? [n : Integer]) (odd? n))
+(define (vt-rightchild? [n : Integer]) (even? n))
 
 
 ;; Operations
-
+(: heapify-up  (All (a) (-> (-> a a Boolean) (Vectorof (U empty a)) Integer Void)))
 (define (heapify-up <=? vec n)
   (unless (vt-root? n)
     (let* ([parent (vt-parent n)]
            [n-key (vector-ref vec n)]
            [parent-key (vector-ref vec parent)])
-      (unless (<=? parent-key n-key)
+      (unless (or (empty? n-key) (empty? parent-key) (<=? parent-key n-key))
         (vector-set! vec parent n-key)
         (vector-set! vec n parent-key)
         (heapify-up <=? vec parent)))))
 
+(: heapify-down (All (a) (case-> (-> (-> a a Boolean) (Vectorof (U empty a)) Integer Integer Void)
+                                 (-> (-> a a Boolean) (Vectorof a) Integer Integer Void))))
 (define (heapify-down <=? vec n size)
   (let ([left (vt-leftchild n)]
         [right (vt-rightchild n)]
         [n-key (vector-ref vec n)])
     (when (< left size)
-      (let ([left-key (vector-ref vec left)])
+      (define left-key (vector-ref vec left))
+      (unless (empty? left-key)
         (let-values ([(child child-key)
                       (if (< right size)
                           (let ([right-key (vector-ref vec right)])
-                            (if (<=? left-key right-key)
+                            (if (and (not (empty? right-key))
+                                     (<=? left-key right-key))
                                 (values left left-key)
                                 (values right right-key)))
                           (values left left-key))])
-          (unless (<=? n-key child-key)
+          (unless (or (empty? n-key) (empty? child-key) (<=? n-key child-key))
             (vector-set! vec n child-key)
             (vector-set! vec child n-key)
             (heapify-down <=? vec child size)))))))
 
-(define (subheap? <=? vec n size)
-  (let ([left (vt-leftchild n)]
-        [right (vt-rightchild n)])
-    (and (if (< left size)
-             (<=? (vector-ref vec n) (vector-ref vec left))
-             #t)
-         (if (< right size)
-             (<=? (vector-ref vec n) (vector-ref vec right))
-             #t))))
-
+(: grow-vector (All (a) (-> (Vectorof (U empty a)) Integer (Vectorof (U empty a)))))
 (define (grow-vector v1 new-size-min)
-  (let ([new-size (let loop ([size (vector-length v1)])
+  (let ([new-size (let loop : Integer ([size (vector-length v1)])
                     (if (>= size new-size-min)
                         size
                         (loop (* size 2))))])
-    (let ([v2 (make-vector new-size #f)])
+    (let ([v2 (ann (make-vector new-size (empty)) (Vectorof (U empty a)))])
       (vector-copy! v2 0 v1 0)
       v2)))
 
+(: shrink-vector (All (a) (-> (Vectorof (U empty a)) (Vectorof (U empty a)))))
 (define (shrink-vector v1)
-  (let ([v2 (make-vector (quotient (vector-length v1) 2) #f)])
+  (let ([v2 (ann (make-vector (quotient (vector-length v1) 2) (empty)) (Vectorof (U empty a)))])
     (vector-copy! v2 0 v1 0 (vector-length v2))
     v2))
 
 ;; Heaps
-
+(: make-heap (All (a) (-> (-> a a Boolean) (heap a))))
 (define (make-heap <=?)
-  (heap (make-vector MIN-SIZE #f) 0 <=?))
+  (heap (ann (make-vector MIN-SIZE (empty)) (Vectorof (U empty a))) 0 <=?))
 
+(: list->heap (All (a) (-> (-> a a Boolean) (List a) (heap a))))
 (define (list->heap <=? lst)
   (vector->heap <=? (list->vector lst)))
 
+(: vector->heap (All (a) (->* ((-> a a Boolean) (Vectorof a)) (Integer Integer) (heap a))))
 (define (vector->heap <=? vec0 [start 0] [end (vector-length vec0)])
   (define size (- end start))
-  (define len (let loop ([len MIN-SIZE]) (if (<= size len) len (loop (* 2 len)))))
-  (define vec (make-vector len #f))
+  (define len (let loop : Integer ([len MIN-SIZE]) (if (<= size len) len (loop (* 2 len)))))
+  (define vec (ann (make-vector len (empty)) (Vectorof (U empty a))))
   ;; size <= length(vec)
-  (vector-copy! vec 0 vec0 start end)
+  (vector-copy! vec 0
+                (for/vector : (Vectorof (U empty a)) ([i vec0]) i)
+                start end)
   (for ([n (in-range (sub1 size) -1 -1)])
     (heapify-down <=? vec n size))
   (heap vec size <=?))
 
+(: heap-copy (All (a) (-> (heap a) (heap a))))
 (define (heap-copy h)
   (match h
     [(heap vec count <=?)
      (heap (vector-copy vec) count <=?)]))
 
+(: heap-add! (All (a) (-> (heap a) a * Void)))
 (define (heap-add! h . keys)
   (heap-add-all! h (list->vector keys)))
 
+(: heap-add-all! (All (a) (-> (heap a) (U (Vectorof a) (Listof a) (heap a)) Void)))
 (define (heap-add-all! h keys)
   (let-values ([(keys keys-size)
                 (cond [(list? keys)
@@ -121,18 +127,23 @@
                          (set-heap-vec! h vec)
                          vec)
                        vec)])
-         (vector-copy! vec size keys 0 keys-size)
+         (vector-copy! vec size
+                       (for/vector : (Vectorof (U empty a)) ([i keys]) i)
+                       0 keys-size)
          (for ([n (in-range size new-size)])
            (heapify-up <=? vec n))
          (set-heap-count! h new-size))])))
 
+(: heap-min (All (a) (-> (heap a) a)))
 (define (heap-min h)
   (match h
     [(heap vec size <=?)
-     (when (zero? size)
+     (define val (vector-ref vec 0))
+     (when (or (zero? size) (empty? val))
        (error 'heap-min "empty heap"))
-     (vector-ref vec 0)]))
+     val]))
 
+(: heap-remove-min! (All (a) (-> (heap a) Void)))
 (define (heap-remove-min! h)
   (match h
     [(heap vec size <=?)
@@ -140,6 +151,7 @@
        (error 'heap-remove-min! "empty heap"))
      (heap-remove-index! h 0)]))
 
+(: heap-remove-index! (All (a) (-> (heap a) Integer Void)))
 (define (heap-remove-index! h index)
   (match h
     [(heap vec size <=?)
@@ -151,7 +163,7 @@
                   "index out of bounds [0,~s]: ~s" (sub1 size) index)))
      (define sub1-size (sub1 size))
      (vector-set! vec index (vector-ref vec sub1-size))
-     (vector-set! vec sub1-size #f)
+     (vector-set! vec sub1-size (empty))
      (cond
        [(= sub1-size index)
         ;; easy to remove the right-most leaf
@@ -160,51 +172,60 @@
         ;; can only go down when at the root
         (heapify-down <=? vec index sub1-size)]
        [else
-        (define index-parent (vt-parent index))
-        (cond
-          ;; if we are in the right relationship with our parent,
-          ;; try to heapify down
-          [(<=? (vector-ref vec index-parent) (vector-ref vec index))
-           (heapify-down <=? vec index sub1-size)]
-          [else
-           ;; otherwise we need to heapify up
-           (heapify-up <=? vec index)])])
+        (define index-key (vector-ref vec index))
+        (define parent-key (vector-ref vec (vt-parent index)))
+        (when (and (not (empty? index-key)) (not (empty? parent-key)))
+          (cond
+            ;; if we are in the right relationship with our parent,
+            ;; try to heapify down
+            [(<=? parent-key index-key)
+             (heapify-down <=? vec index sub1-size)]
+            [else
+             ;; otherwise we need to heapify up
+             (heapify-up <=? vec index)]))])
      (when (< MIN-SIZE size (quotient (vector-length vec) 4))
        (set-heap-vec! h (shrink-vector vec)))
      (set-heap-count! h sub1-size)]))
 
+(: heap-get-index (All (a) (-> (heap a) a (-> a a Boolean) (U False Integer))))
 (define (heap-get-index h v same?)
   (match h
     [(heap vec size <=?)
      (and (not (eq? 0 size))
           (let search ([n 0] [n-key (vector-ref vec 0)])
             (cond
-             [(same? n-key v) n]
+             [(and (not (empty? n-key)) (same? n-key v)) n]
              ;; The heap property ensures n-key <= all its children
              [else
               (define (search-right)
                 (define right (vt-rightchild n))
                 (and (< right size)
                      (let ([right-key (vector-ref vec right)])
-                       (and (<=? right-key v)
+                       (and (not (empty? right-key))
+                            (<=? right-key v)
                             (search right right-key)))))
               ;; Try going left if the left child is <= v
               (define left (vt-leftchild n))
               (and (< left size) ;; if no left, there can't be a right.
                    (let ([left-key (vector-ref vec left)])
-                     ;; If left <= v, try left side.
-                     (if (<=? left-key v)
-                         (or (search left left-key) (search-right))
-                         (search-right))))])))]))
+                     (and (not (empty? left-key))
+                          ;; If left <= v, try left side.
+                          (if (<=? left-key v)
+                              (or (search left left-key) (search-right))
+                              (search-right)))))])))]))
 
+(: heap-remove! (All (a) (->* ((heap a) a) (#:same? (-> a a Boolean)) Void)))
 (define (heap-remove! h v #:same? [same? equal?])
-  (match (heap-get-index h v same?)
-    [#f (void)]
-    [n (heap-remove-index! h n)]))
+  (define index/#f (heap-get-index h v same?))
+  (cond
+    [(false? index/#f) (void)]
+    [else (heap-remove-index! h index/#f)]))
 
+(: in-heap (All (a) (-> (heap a) (Sequenceof a))))
 (define (in-heap h)
   (in-heap/consume! (heap-copy h)))
 
+(: in-heap/consume! (All (a) (-> (heap a) (Sequenceof a))))
 (define (in-heap/consume! h)
   (make-do-sequence
    (lambda ()
@@ -218,6 +239,8 @@
 ;; --------
 
 ;; preferred order is (heap-sort vec <=?), but allow old order too
+(: heap-sort! (All (a) (-> (U (-> a a Boolean) (Vectorof a))
+                           (U (-> a a Boolean) (Vectorof a)) Void)))
 (define (heap-sort! x y)
   (cond [(and (vector? x) (procedure? y))
          (heap-sort!* x y)]
@@ -228,9 +251,10 @@
            (raise-argument-error 'heap-sort! "vector?" x))
          (raise-argument-error 'heap-sort! "procedure?" y)]))
 
+(: heap-sort!* (All (a) (-> (Vectorof a) (-> a a Boolean) Void)))
 (define (heap-sort!* v <=?)
   ;; to get ascending order, need max-heap, so reverse comparison
-  (define (>=? x y) (<=? y x))
+  (define (>=? [x : a] [y : a]) (<=? y x))
   (define size (vector-length v))
   (for ([n (in-range (sub1 size) -1 -1)])
     (heapify-down >=? v n size))
@@ -240,45 +264,48 @@
       (vector-set! v last tmp))
     (heapify-down >=? v 0 last)))
 
+(: heap->vector (All (a) (-> (heap a) (Vectorof a))))
 (define (heap->vector h)
   (match h
     [(heap vec size <=?)
-     (let ([v (vector-copy vec 0 size)])
+     (let ([v (for/vector : (Vectorof a) ([i (vector-copy vec 0 size)] #:when (not (empty? i))) i)])
        (heap-sort!* v <=?)
        v)]))
 
 ;; --------
 
-(provide/contract
- [make-heap (-> (-> any/c any/c any/c) heap?)]
- [heap? (-> any/c boolean?)]
- [heap-count (-> heap? exact-nonnegative-integer?)]
- [heap-add! (->* (heap?) () #:rest list? void?)]
- [heap-add-all! (-> heap? (or/c list? vector? heap?) void?)]
- [heap-min (-> heap? any/c)]
- [heap-remove-min! (-> heap? void?)]
- [heap-remove! (->* (heap? any/c) [#:same? (-> any/c any/c any/c)] void?)]
+(provide
+ make-heap
+ heap?
+ heap-count
+ heap-add!
+ heap-add-all!
+ heap-min
+ heap-remove-min!
+ heap-remove!
 
- [vector->heap (-> (-> any/c any/c any/c) vector? heap?)]
- [heap->vector (-> heap? vector?)]
- [heap-copy (-> heap? heap?)]
+ vector->heap
+ heap->vector
+ heap-copy
 
- [in-heap (-> heap? sequence?)]
- [in-heap/consume! (-> heap? sequence?)])
+ in-heap
+ in-heap/consume!)
 
 (provide heap-sort!)
 
 (module+ test-util
   (provide valid-heap?)
+  (: valid-heap? (-> (heap Flonum) Boolean))
   (define (valid-heap? a-heap)
     (match a-heap
       [(heap vec size <=?)
-       (let loop ([i 0]
-                  [parent -inf.0])
+       (let loop : Boolean ([i 0]
+                            [parent -inf.0])
          (cond
            [(< i size)
             (define this (vector-ref vec i))
-            (and (<=? parent this)
+            (and (not (empty? this))
+                 (<=? parent this)
                  (loop (vt-leftchild i) this)
                  (loop (vt-rightchild i) this))]
            [else #t]))])))
